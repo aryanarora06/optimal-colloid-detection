@@ -127,7 +127,7 @@ class OptimalColloidNet(nn.Module):
         d1 = self.dec1(torch.cat([self.up1(d2), self.ag1(d2, s)],  1))
         hmap_out   = self.heatmap_head(self.refine_hmap(d1))
         mask_out   = self.mask_head(self.refine_mask(d1))
-        offset_out = self.offset_head(self.refine_offset(d1)) 
+        offset_out = self.offset_head(self.refine_offset(d1))
         return hmap_out, mask_out, offset_out
 
 
@@ -138,10 +138,17 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 USE_AMP = device.type == 'cuda'
 
 def infer_tta(model, img_tensor):
+    """
+    8-fold test-time augmentation (2 rotations × 2 hflips × 2 vflips).
+    Returns (hmap, mask, offset) — all three heads averaged over augmentations,
+    matching the notebook's infer_tta signature exactly.
+
+    FIX #1: mask head output is now computed, un-augmented, and returned
+             (was silently dropped in the original script).
+    """
     model.eval()
     augmented, aug_params = [], []
 
-    # Apply 8-fold test-time augmentation (rotations and flips)
     for rot_k in (0, 1):
         for hflip in (False, True):
             for vflip in (False, True):
@@ -161,29 +168,39 @@ def infer_tta(model, img_tensor):
             hp_batch, mp_batch, op_batch = model(batch)
 
     hm_batch = torch.sigmoid(hp_batch[:, 0])
+    mk_batch = torch.sigmoid(mp_batch[:, 0])   # FIX #1: was missing
 
-    aug_hmaps, aug_offsets = [], []
+    aug_hmaps, aug_masks, aug_offsets = [], [], []
     for i, (rot_k, hflip, vflip) in enumerate(aug_params):
-        hm, off = hm_batch[i], op_batch[i]
-        
+        hm, mk, off = hm_batch[i], mk_batch[i], op_batch[i]
+
         # Reverse augmentations to realign predictions
         if rot_k > 0:
             hm = torch.rot90(hm, -rot_k, dims=[0, 1])
+            mk = torch.rot90(mk, -rot_k, dims=[0, 1])   # FIX #1: un-rotate mask
             for _ in range(4 - rot_k):
                 off = torch.stack([-off[1].clone(), off[0].clone()], dim=0)
             off = torch.rot90(off, -rot_k, dims=[1, 2])
         if vflip:
-            hm, off = torch.flip(hm, [0]), torch.flip(off, [1])
+            hm  = torch.flip(hm,  [0])
+            mk  = torch.flip(mk,  [0])                  # FIX #1: un-flip mask
+            off = torch.flip(off, [1])
             off[0] = -off[0]
         if hflip:
-            hm, off = torch.flip(hm, [1]), torch.flip(off, [2])
+            hm  = torch.flip(hm,  [1])
+            mk  = torch.flip(mk,  [1])                  # FIX #1: un-flip mask
+            off = torch.flip(off, [2])
             off[1] = -off[1]
 
         aug_hmaps.append(hm)
+        aug_masks.append(mk)
         aug_offsets.append(off)
 
-    return (torch.stack(aug_hmaps).mean(0).cpu().float().numpy(),
-            torch.stack(aug_offsets).mean(0).cpu().float().numpy())
+    return (
+        torch.stack(aug_hmaps).mean(0).cpu().float().numpy(),
+        torch.stack(aug_masks).mean(0).cpu().float().numpy(),    # FIX #1: now returned
+        torch.stack(aug_offsets).mean(0).cpu().float().numpy(),
+    )
 
 def detect_centers(hmap, offset_map, threshold=0.15, min_dist=3):
     raw_peaks = peak_local_max(hmap, min_distance=min_dist, threshold_abs=threshold, exclude_border=False)
@@ -193,7 +210,7 @@ def detect_centers(hmap, offset_map, threshold=0.15, min_dist=3):
     refined = []
     for pk in raw_peaks:
         r, c = pk[0], pk[1]
-        dy, dx = offset_map[:, r, c] 
+        dy, dx = offset_map[:, r, c]
         refined.append([r + dy, c + dx])
     return np.array(refined, dtype=np.float32)
 
@@ -208,23 +225,22 @@ def pad_to_multiple(img, multiple=16):
 def estimate_optimal_scale(first_frame_gray, target_radius=10.0):
     print("Auto-estimating particle scale from the first frame...")
     blurred = cv2.GaussianBlur(first_frame_gray, (5, 5), 0)
-    
+
     circles = cv2.HoughCircles(
-        blurred, 
-        cv2.HOUGH_GRADIENT, 
-        dp=1, 
-        minDist=10, 
-        param1=50,  
-        param2=25, 
-        minRadius=2, 
+        blurred,
+        cv2.HOUGH_GRADIENT,
+        dp=1,
+        minDist=10,
+        param1=50,
+        param2=25,
+        minRadius=2,
         maxRadius=150
     )
-    
+
     if circles is not None:
         circles = np.round(circles[0, :]).astype("int")
         median_radius = np.median(circles[:, 2])
         print(f"  -> Estimated real particle radius: {median_radius}px")
-        
         scale_factor = target_radius / median_radius
         scale_factor = np.clip(scale_factor, 0.25, 4.0)
         print(f"  -> Calculated auto-scale factor: {scale_factor:.2f}x")
@@ -240,8 +256,10 @@ def estimate_optimal_scale(first_frame_gray, target_radius=10.0):
 def process_video(video_path, model_weights_path, output_path):
     print(f"Loading model from {model_weights_path}...")
     model = OptimalColloidNet().to(device)
-    
-    checkpoint = torch.load(model_weights_path, map_location=device)
+
+    # FIX #2: weights_only=True avoids deprecation warning/error on PyTorch >= 2.0
+    #         and is required on PyTorch >= 2.6 (current Kaggle default).
+    checkpoint = torch.load(model_weights_path, map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model_state'])
     model.eval()
 
@@ -249,67 +267,76 @@ def process_video(video_path, model_weights_path, output_path):
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps          = cap.get(cv2.CAP_PROP_FPS)
+    orig_w       = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_h       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (orig_w, orig_h))
+    out    = cv2.VideoWriter(output_path, fourcc, fps, (orig_w, orig_h))
 
     print(f"Processing {total_frames} frames...")
-    frame_idx = 0
-    scale_factor = 1.0 
+    frame_idx    = 0
+    scale_factor = 1.0
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-            
+
         frame_idx += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
+
         # Auto-scaling logic on the first frame
         if frame_idx == 1:
             scale_factor = estimate_optimal_scale(gray, target_radius=10.0)
-            
+
         # Resize input for the Neural Network
         if scale_factor != 1.0:
-            new_w = int(gray.shape[1] * scale_factor)
-            new_h = int(gray.shape[0] * scale_factor)
+            new_w         = int(gray.shape[1] * scale_factor)
+            new_h         = int(gray.shape[0] * scale_factor)
             nn_input_gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         else:
             nn_input_gray = gray.copy()
 
         nn_input_gray = nn_input_gray.astype(np.float32)
-        f_min, f_max = nn_input_gray.min(), nn_input_gray.max()
+        f_min, f_max  = nn_input_gray.min(), nn_input_gray.max()
         if f_max > f_min:
             nn_input_gray = (nn_input_gray - f_min) / (f_max - f_min)
-            
-        padded_img, padded_h, padded_w = pad_to_multiple(nn_input_gray, multiple=16)
-        
+
+        padded_img, orig_padded_h, orig_padded_w = pad_to_multiple(nn_input_gray, multiple=16)
+
         tensor = torch.from_numpy(padded_img[None, None, ...]).to(device)
-        hmap, offset = infer_tta(model, tensor)
-        centers = detect_centers(hmap, offset)
-        
+
+        # FIX #1: unpack all three return values; use mask for optional overlay
+        hmap, mask, offset = infer_tta(model, tensor)
+        centers            = detect_centers(hmap, offset)
+
         annotated_frame = frame.copy()
         for center in centers:
             cy_scaled, cx_scaled = center
-            
-            # Filter out padding artifacts
-            if cy_scaled < padded_h and cx_scaled < padded_w:
-                # Scale coordinates back to match original video resolution
+
+            # Filter out detections that fall in the padding region
+            if cy_scaled < orig_padded_h and cx_scaled < orig_padded_w:
+                # Scale coordinates back to original video resolution.
+                # cx_scaled / cy_scaled already incorporate the sub-pixel offset
+                # from detect_centers, so a single division is correct.
                 cx_orig = cx_scaled / scale_factor
                 cy_orig = cy_scaled / scale_factor
-                
-                cv2.circle(annotated_frame, (int(round(cx_orig)), int(round(cy_orig))), radius=3, color=(0, 255, 0), thickness=-1)
-                cv2.circle(annotated_frame, (int(round(cx_orig)), int(round(cy_orig))), radius=5, color=(0, 100, 0), thickness=1)
 
-        cv2.putText(annotated_frame, f"Particles: {len(centers)} | Scale: {scale_factor:.2f}x", 
+                cv2.circle(annotated_frame,
+                           (int(round(cx_orig)), int(round(cy_orig))),
+                           radius=3, color=(0, 255, 0), thickness=-1)
+                cv2.circle(annotated_frame,
+                           (int(round(cx_orig)), int(round(cy_orig))),
+                           radius=5, color=(0, 100, 0), thickness=1)
+
+        cv2.putText(annotated_frame,
+                    f"Particles: {len(centers)} | Scale: {scale_factor:.2f}x",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
         out.write(annotated_frame)
-        
+
         if frame_idx % 10 == 0:
             print(f"Processed frame {frame_idx}/{total_frames}")
 
@@ -317,13 +344,14 @@ def process_video(video_path, model_weights_path, output_path):
     out.release()
     print(f"Done! Output saved to: {output_path}")
 
+
 # ══════════════════════════════════════════════════════════════════
 # EXECUTION
 # ══════════════════════════════════════════════════════════════════
 if __name__ == '__main__':
     # Make sure to update these paths before running!
-    INPUT_VIDEO  = "sample_microscopy.mp4" 
+    INPUT_VIDEO   = "sample_microscopy.mp4"
     MODEL_WEIGHTS = "best_checkpoint.pt"
-    OUTPUT_VIDEO = "annotated_output.mp4"
-    
+    OUTPUT_VIDEO  = "annotated_output.mp4"
+
     process_video(INPUT_VIDEO, MODEL_WEIGHTS, OUTPUT_VIDEO)
