@@ -7,16 +7,12 @@ This project consists of two parts:
 - **`optimalcolloidpython.ipynb`** — trains the `OptimalColloidNet` model on synthetically generated microscopy images and saves a checkpoint.
 - **`analyze_video.py`** — loads the trained checkpoint and runs inference on a real microscopy video, producing an annotated output video.
 
----
-
 ## Step 1 — Set Up a Kaggle Notebook
 
 1. Go to [kaggle.com](https://www.kaggle.com) and sign in.
 2. Click **+ New Notebook**.
 3. In the top-right, click the ⚙️ settings panel and set **Accelerator** to **GPU T4 x2** (recommended) or GPU P100.
 4. Make sure **Internet** is toggled **on** (required for any pip installs).
-
----
 
 ## Step 2 — Upload Your Files
 
@@ -28,13 +24,9 @@ In the notebook sidebar, click **Add data → Upload** and add:
 
 Uploaded files land at `/kaggle/input/<dataset-name>/`.
 
----
-
 ## Step 3 — Install Dependencies
 
 All major libraries are pre-installed on Kaggle (use Requirements.txt).
-
----
 
 ## Step 4 — Train the Model (run the notebook)
 
@@ -45,8 +37,6 @@ Open `optimalcolloidpython.ipynb` and run all cells. Training will:
 - Save the best checkpoint to `colloid_output/best_checkpoint.pt`.
 
 Expected training time on a single T4 GPU: ~20–40 minutes.
-
----
 
 ## Step 5 — Run Inference on Your Video
 
@@ -78,8 +68,6 @@ The script will:
 
 Output is saved to `/kaggle/working/annotated_output.mp4`, which you can download directly from the Kaggle file browser on the right-hand panel.
 
----
-
 ## Output Files
 
 | File | Location | Description |
@@ -87,8 +75,6 @@ Output is saved to `/kaggle/working/annotated_output.mp4`, which you can downloa
 | `best_checkpoint.pt` | `colloid_output/` | Trained model weights |
 | `loss_curve.png` | `colloid_output/` | Training/validation loss plot |
 | `annotated_output.mp4` | `/kaggle/working/` | Video with particle detections |
-
----
 
 ## Tips
 
