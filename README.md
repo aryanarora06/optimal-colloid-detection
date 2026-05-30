@@ -1,4 +1,6 @@
 # Colloid Particle Detection
+<img width="250" height="250" alt="image" src="https://github.com/user-attachments/assets/c9bd788a-395f-4e83-a5ae-51877ecdf34f" />
+
 
 This project consists of two parts:
 
