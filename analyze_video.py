@@ -202,17 +202,43 @@ def infer_tta(model, img_tensor):
         torch.stack(aug_offsets).mean(0).cpu().float().numpy(),
     )
 
-def detect_centers(hmap, offset_map, threshold=0.15, min_dist=3):
-    raw_peaks = peak_local_max(hmap, min_distance=min_dist, threshold_abs=threshold, exclude_border=False)
+def detect_centers(hmap, offset_map, mask=None, threshold=0.30, min_dist=8,
+                   mask_threshold=0.40, hmap_smooth_sigma=1.0):
+    """
+    Detect particle centres from the heatmap with three FP-reduction steps:
+
+    1. Gaussian-smooth the heatmap before peak finding — suppresses isolated
+       single-pixel noise spikes that score just above `threshold`.
+    2. Raise `threshold` (default 0.30 vs old 0.15) so weak noise peaks are
+       ignored outright.
+    3. Increase `min_dist` (default 8 vs old 3) so peaks can't be packed
+       tighter than ~8 px at the scaled resolution.
+    4. Mask gate — if the model's segmentation mask is provided, discard any
+       peak whose mask score is below `mask_threshold`.  Real particles produce
+       a strong mask response; noise blobs do not.
+    """
+    # Step 1: smooth heatmap to kill isolated noise spikes
+    if hmap_smooth_sigma > 0:
+        hmap = gaussian_filter(hmap, sigma=hmap_smooth_sigma)
+
+    raw_peaks = peak_local_max(hmap, min_distance=min_dist,
+                               threshold_abs=threshold, exclude_border=False)
     if len(raw_peaks) == 0:
         return np.empty((0, 2), dtype=np.float32)
 
     refined = []
     for pk in raw_peaks:
         r, c = pk[0], pk[1]
+
+        # Step 4: mask gate — skip peaks with no mask support
+        if mask is not None:
+            if mask[r, c] < mask_threshold:
+                continue
+
         dy, dx = offset_map[:, r, c]
         refined.append([r + dy, c + dx])
-    return np.array(refined, dtype=np.float32)
+
+    return np.array(refined, dtype=np.float32) if refined else np.empty((0, 2), dtype=np.float32)
 
 def pad_to_multiple(img, multiple=16):
     h, w = img.shape
@@ -308,9 +334,10 @@ def process_video(video_path, model_weights_path, output_path):
 
         tensor = torch.from_numpy(padded_img[None, None, ...]).to(device)
 
-        # FIX #1: unpack all three return values; use mask for optional overlay
+        # FIX #1: unpack all three return values
+        # FIX #3: pass mask into detect_centers for false-positive gating
         hmap, mask, offset = infer_tta(model, tensor)
-        centers            = detect_centers(hmap, offset)
+        centers            = detect_centers(hmap, offset, mask=mask)
 
         annotated_frame = frame.copy()
         for center in centers:
@@ -331,8 +358,12 @@ def process_video(video_path, model_weights_path, output_path):
                            (int(round(cx_orig)), int(round(cy_orig))),
                            radius=5, color=(0, 100, 0), thickness=1)
 
+        n_drawn = sum(
+            1 for cy_s, cx_s in centers
+            if cy_s < orig_padded_h and cx_s < orig_padded_w
+        )
         cv2.putText(annotated_frame,
-                    f"Particles: {len(centers)} | Scale: {scale_factor:.2f}x",
+                    f"Particles: {n_drawn} | Scale: {scale_factor:.2f}x",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
         out.write(annotated_frame)
