@@ -1,13 +1,13 @@
-# 🔬 OptimalColloidNet: Microscopic Particle Detection (Kaggle Edition)
+# OptimalColloidNet: Microscopic Particle Detection (Kaggle Edition)
 
-## 📖 Overview
+## Overview
 OptimalColloidNet is a deep learning framework designed to accurately detect and localize colloidal particles in microscopy videos. Utilizing a custom multi-head Convolutional Neural Network (CNN) featuring Attention Gates and ASPP, the model predicts exact sub-pixel particle centers.
 
 This repository contains the complete pipeline: from synthetic multi-modal microscopy data generation and model training to high-precision test-time augmented (TTA) inference on real videos.
 
 **Note:** This guide is specifically tailored for running the pipeline on **Kaggle**.
 
-## ⚙️ Kaggle Environment Setup
+## Kaggle Environment Setup
 
 Kaggle provides free GPU access, which is highly recommended for training this model efficiently.
 
@@ -16,7 +16,7 @@ Kaggle provides free GPU access, which is highly recommended for training this m
 3. **Enable GPU:** In the panel under **Settings**, set the **Accelerator** to **GPU T4 x2** or **GPU P100**.
 4. **Enable Internet:** Ensure **Internet** is toggled **On** (required if you need to `pip install` any specific versions of packages, though Kaggle has most pre-installed).
 
-## 🚀 Usage Guide
+## Usage Guide
 
 ### 1. Training the Model
 Simply run all cells in the `optimalcolloidpython.ipynb` notebook. 
